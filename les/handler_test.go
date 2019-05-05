@@ -17,7 +17,7 @@
 package les
 
 import (
-	"bytes"
+	"encoding/binary"
 	"math/big"
 	"math/rand"
 	"testing"
@@ -26,10 +26,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/downloader"
-	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/light"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
@@ -45,35 +45,13 @@ func expectResponse(r p2p.MsgReader, msgcode, reqID, bv uint64, data interface{}
 	return p2p.ExpectMsg(r, msgcode, resp{reqID, bv, data})
 }
 
-func testCheckProof(t *testing.T, exp *light.NodeSet, got light.NodeList) {
-	if exp.KeyCount() > len(got) {
-		t.Errorf("proof has fewer nodes than expected")
-		return
-	}
-	if exp.KeyCount() < len(got) {
-		t.Errorf("proof has more nodes than expected")
-		return
-	}
-	for _, node := range got {
-		n, _ := exp.Get(crypto.Keccak256(node))
-		if !bytes.Equal(n, node) {
-			t.Errorf("proof contents mismatch")
-			return
-		}
-	}
-}
-
 // Tests that block headers can be retrieved from a remote chain based on user queries.
-func TestGetBlockHeadersLes1(t *testing.T) { testGetBlockHeaders(t, 1) }
-
 func TestGetBlockHeadersLes2(t *testing.T) { testGetBlockHeaders(t, 2) }
 
 func testGetBlockHeaders(t *testing.T, protocol int) {
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, downloader.MaxHashFetch+15, nil, nil, nil, db)
-	bc := pm.blockchain.(*core.BlockChain)
-	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
-	defer peer.close()
+	server, tearDown := newServerEnv(t, downloader.MaxHashFetch+15, protocol, nil)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
 
 	// Create a "random" unknown hash for testing
 	var unknown common.Hash
@@ -186,25 +164,21 @@ func testGetBlockHeaders(t *testing.T, protocol int) {
 		}
 		// Send the hash request and verify the response
 		reqID++
-		cost := peer.GetRequestCost(GetBlockHeadersMsg, int(tt.query.Amount))
-		sendRequest(peer.app, GetBlockHeadersMsg, reqID, cost, tt.query)
-		if err := expectResponse(peer.app, BlockHeadersMsg, reqID, testBufLimit, headers); err != nil {
+		cost := server.tPeer.GetRequestCost(GetBlockHeadersMsg, int(tt.query.Amount))
+		sendRequest(server.tPeer.app, GetBlockHeadersMsg, reqID, cost, tt.query)
+		if err := expectResponse(server.tPeer.app, BlockHeadersMsg, reqID, testBufLimit, headers); err != nil {
 			t.Errorf("test %d: headers mismatch: %v", i, err)
 		}
 	}
 }
 
 // Tests that block contents can be retrieved from a remote chain based on their hashes.
-func TestGetBlockBodiesLes1(t *testing.T) { testGetBlockBodies(t, 1) }
-
 func TestGetBlockBodiesLes2(t *testing.T) { testGetBlockBodies(t, 2) }
 
 func testGetBlockBodies(t *testing.T, protocol int) {
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, downloader.MaxBlockFetch+15, nil, nil, nil, db)
-	bc := pm.blockchain.(*core.BlockChain)
-	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
-	defer peer.close()
+	server, tearDown := newServerEnv(t, downloader.MaxBlockFetch+15, protocol, nil)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
 
 	// Create a batch of tests for various scenarios
 	limit := MaxBodyFetch
@@ -264,26 +238,22 @@ func testGetBlockBodies(t *testing.T, protocol int) {
 		}
 		reqID++
 		// Send the hash request and verify the response
-		cost := peer.GetRequestCost(GetBlockBodiesMsg, len(hashes))
-		sendRequest(peer.app, GetBlockBodiesMsg, reqID, cost, hashes)
-		if err := expectResponse(peer.app, BlockBodiesMsg, reqID, testBufLimit, bodies); err != nil {
+		cost := server.tPeer.GetRequestCost(GetBlockBodiesMsg, len(hashes))
+		sendRequest(server.tPeer.app, GetBlockBodiesMsg, reqID, cost, hashes)
+		if err := expectResponse(server.tPeer.app, BlockBodiesMsg, reqID, testBufLimit, bodies); err != nil {
 			t.Errorf("test %d: bodies mismatch: %v", i, err)
 		}
 	}
 }
 
 // Tests that the contract codes can be retrieved based on account addresses.
-func TestGetCodeLes1(t *testing.T) { testGetCode(t, 1) }
-
 func TestGetCodeLes2(t *testing.T) { testGetCode(t, 2) }
 
 func testGetCode(t *testing.T, protocol int) {
 	// Assemble the test environment
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, 4, testChainGen, nil, nil, db)
-	bc := pm.blockchain.(*core.BlockChain)
-	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
-	defer peer.close()
+	server, tearDown := newServerEnv(t, 4, protocol, nil)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
 
 	var codereqs []*CodeReq
 	var codes [][]byte
@@ -300,25 +270,21 @@ func testGetCode(t *testing.T, protocol int) {
 		}
 	}
 
-	cost := peer.GetRequestCost(GetCodeMsg, len(codereqs))
-	sendRequest(peer.app, GetCodeMsg, 42, cost, codereqs)
-	if err := expectResponse(peer.app, CodeMsg, 42, testBufLimit, codes); err != nil {
+	cost := server.tPeer.GetRequestCost(GetCodeMsg, len(codereqs))
+	sendRequest(server.tPeer.app, GetCodeMsg, 42, cost, codereqs)
+	if err := expectResponse(server.tPeer.app, CodeMsg, 42, testBufLimit, codes); err != nil {
 		t.Errorf("codes mismatch: %v", err)
 	}
 }
 
 // Tests that the transaction receipts can be retrieved based on hashes.
-func TestGetReceiptLes1(t *testing.T) { testGetReceipt(t, 1) }
-
 func TestGetReceiptLes2(t *testing.T) { testGetReceipt(t, 2) }
 
 func testGetReceipt(t *testing.T, protocol int) {
 	// Assemble the test environment
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, 4, testChainGen, nil, nil, db)
-	bc := pm.blockchain.(*core.BlockChain)
-	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
-	defer peer.close()
+	server, tearDown := newServerEnv(t, 4, protocol, nil)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
 
 	// Collect the hashes to request, and the response to expect
 	hashes, receipts := []common.Hash{}, []types.Receipts{}
@@ -326,40 +292,33 @@ func testGetReceipt(t *testing.T, protocol int) {
 		block := bc.GetBlockByNumber(i)
 
 		hashes = append(hashes, block.Hash())
-		receipts = append(receipts, core.GetBlockReceipts(db, block.Hash(), block.NumberU64()))
+		receipts = append(receipts, rawdb.ReadRawReceipts(server.db, block.Hash(), block.NumberU64()))
 	}
 	// Send the hash request and verify the response
-	cost := peer.GetRequestCost(GetReceiptsMsg, len(hashes))
-	sendRequest(peer.app, GetReceiptsMsg, 42, cost, hashes)
-	if err := expectResponse(peer.app, ReceiptsMsg, 42, testBufLimit, receipts); err != nil {
+	cost := server.tPeer.GetRequestCost(GetReceiptsMsg, len(hashes))
+	sendRequest(server.tPeer.app, GetReceiptsMsg, 42, cost, hashes)
+	if err := expectResponse(server.tPeer.app, ReceiptsMsg, 42, testBufLimit, receipts); err != nil {
 		t.Errorf("receipts mismatch: %v", err)
 	}
 }
 
 // Tests that trie merkle proofs can be retrieved
-func TestGetProofsLes1(t *testing.T) { testGetProofs(t, 1) }
-
 func TestGetProofsLes2(t *testing.T) { testGetProofs(t, 2) }
 
 func testGetProofs(t *testing.T, protocol int) {
 	// Assemble the test environment
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, 4, testChainGen, nil, nil, db)
-	bc := pm.blockchain.(*core.BlockChain)
-	peer, _ := newTestPeer(t, "peer", protocol, pm, true)
-	defer peer.close()
+	server, tearDown := newServerEnv(t, 4, protocol, nil)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
 
-	var (
-		proofreqs []ProofReq
-		proofsV1  [][]rlp.RawValue
-	)
+	var proofreqs []ProofReq
 	proofsV2 := light.NewNodeSet()
 
 	accounts := []common.Address{testBankAddress, acc1Addr, acc2Addr, {}}
 	for i := uint64(0); i <= bc.CurrentBlock().NumberU64(); i++ {
 		header := bc.GetHeaderByNumber(i)
 		root := header.Root
-		trie, _ := trie.New(root, db)
+		trie, _ := trie.New(root, trie.NewDatabase(server.db))
 
 		for _, acc := range accounts {
 			req := ProofReq{
@@ -367,55 +326,113 @@ func testGetProofs(t *testing.T, protocol int) {
 				Key:   crypto.Keccak256(acc[:]),
 			}
 			proofreqs = append(proofreqs, req)
-
-			switch protocol {
-			case 1:
-				var proof light.NodeList
-				trie.Prove(crypto.Keccak256(acc[:]), 0, &proof)
-				proofsV1 = append(proofsV1, proof)
-			case 2:
-				trie.Prove(crypto.Keccak256(acc[:]), 0, proofsV2)
-			}
+			trie.Prove(crypto.Keccak256(acc[:]), 0, proofsV2)
 		}
 	}
 	// Send the proof request and verify the response
-	switch protocol {
-	case 1:
-		cost := peer.GetRequestCost(GetProofsV1Msg, len(proofreqs))
-		sendRequest(peer.app, GetProofsV1Msg, 42, cost, proofreqs)
-		if err := expectResponse(peer.app, ProofsV1Msg, 42, testBufLimit, proofsV1); err != nil {
-			t.Errorf("proofs mismatch: %v", err)
+	cost := server.tPeer.GetRequestCost(GetProofsV2Msg, len(proofreqs))
+	sendRequest(server.tPeer.app, GetProofsV2Msg, 42, cost, proofreqs)
+	if err := expectResponse(server.tPeer.app, ProofsV2Msg, 42, testBufLimit, proofsV2.NodeList()); err != nil {
+		t.Errorf("proofs mismatch: %v", err)
+	}
+}
+
+// Tests that CHT proofs can be correctly retrieved.
+func TestGetCHTProofsLes2(t *testing.T) { testGetCHTProofs(t, 2) }
+
+func testGetCHTProofs(t *testing.T, protocol int) {
+	config := light.TestServerIndexerConfig
+
+	waitIndexers := func(cIndexer, bIndexer, btIndexer *core.ChainIndexer) {
+		for {
+			cs, _, _ := cIndexer.Sections()
+			if cs >= 1 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-	case 2:
-		cost := peer.GetRequestCost(GetProofsV2Msg, len(proofreqs))
-		sendRequest(peer.app, GetProofsV2Msg, 42, cost, proofreqs)
-		msg, err := peer.app.ReadMsg()
-		if err != nil {
-			t.Errorf("Message read error: %v", err)
+	}
+	server, tearDown := newServerEnv(t, int(config.ChtSize+config.ChtConfirms), protocol, waitIndexers)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
+
+	// Assemble the proofs from the different protocols
+	header := bc.GetHeaderByNumber(config.ChtSize - 1)
+	rlp, _ := rlp.EncodeToBytes(header)
+
+	key := make([]byte, 8)
+	binary.BigEndian.PutUint64(key, config.ChtSize-1)
+
+	proofsV2 := HelperTrieResps{
+		AuxData: [][]byte{rlp},
+	}
+	root := light.GetChtRoot(server.db, 0, bc.GetHeaderByNumber(config.ChtSize-1).Hash())
+	trie, _ := trie.New(root, trie.NewDatabase(rawdb.NewTable(server.db, light.ChtTablePrefix)))
+	trie.Prove(key, 0, &proofsV2.Proofs)
+	// Assemble the requests for the different protocols
+	requestsV2 := []HelperTrieReq{{
+		Type:    htCanonical,
+		TrieIdx: 0,
+		Key:     key,
+		AuxReq:  auxHeader,
+	}}
+	// Send the proof request and verify the response
+	cost := server.tPeer.GetRequestCost(GetHelperTrieProofsMsg, len(requestsV2))
+	sendRequest(server.tPeer.app, GetHelperTrieProofsMsg, 42, cost, requestsV2)
+	if err := expectResponse(server.tPeer.app, HelperTrieProofsMsg, 42, testBufLimit, proofsV2); err != nil {
+		t.Errorf("proofs mismatch: %v", err)
+	}
+}
+
+// Tests that bloombits proofs can be correctly retrieved.
+func TestGetBloombitsProofs(t *testing.T) {
+	config := light.TestServerIndexerConfig
+
+	waitIndexers := func(cIndexer, bIndexer, btIndexer *core.ChainIndexer) {
+		for {
+			bts, _, _ := btIndexer.Sections()
+			if bts >= 1 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		var resp struct {
-			ReqID, BV uint64
-			Data      light.NodeList
+	}
+	server, tearDown := newServerEnv(t, int(config.BloomTrieSize+config.BloomTrieConfirms), 2, waitIndexers)
+	defer tearDown()
+	bc := server.pm.blockchain.(*core.BlockChain)
+
+	// Request and verify each bit of the bloom bits proofs
+	for bit := 0; bit < 2048; bit++ {
+		// Assemble the request and proofs for the bloombits
+		key := make([]byte, 10)
+
+		binary.BigEndian.PutUint16(key[:2], uint16(bit))
+		// Only the first bloom section has data.
+		binary.BigEndian.PutUint64(key[2:], 0)
+
+		requests := []HelperTrieReq{{
+			Type:    htBloomBits,
+			TrieIdx: 0,
+			Key:     key,
+		}}
+		var proofs HelperTrieResps
+
+		root := light.GetBloomTrieRoot(server.db, 0, bc.GetHeaderByNumber(config.BloomTrieSize-1).Hash())
+		trie, _ := trie.New(root, trie.NewDatabase(rawdb.NewTable(server.db, light.BloomTrieTablePrefix)))
+		trie.Prove(key, 0, &proofs.Proofs)
+
+		// Send the proof request and verify the response
+		cost := server.tPeer.GetRequestCost(GetHelperTrieProofsMsg, len(requests))
+		sendRequest(server.tPeer.app, GetHelperTrieProofsMsg, 42, cost, requests)
+		if err := expectResponse(server.tPeer.app, HelperTrieProofsMsg, 42, testBufLimit, proofs); err != nil {
+			t.Errorf("bit %d: proofs mismatch: %v", bit, err)
 		}
-		if err := msg.Decode(&resp); err != nil {
-			t.Errorf("reply decode error: %v", err)
-		}
-		if msg.Code != ProofsV2Msg {
-			t.Errorf("Message code mismatch")
-		}
-		if resp.ReqID != 42 {
-			t.Errorf("ReqID mismatch")
-		}
-		if resp.BV != testBufLimit {
-			t.Errorf("BV mismatch")
-		}
-		testCheckProof(t, proofsV2, resp.Data)
 	}
 }
 
 func TestTransactionStatusLes2(t *testing.T) {
-	db, _ := ethdb.NewMemDatabase()
-	pm := newTestProtocolManagerMust(t, false, 0, nil, nil, nil, db)
+	db := rawdb.NewMemoryDatabase()
+	pm := newTestProtocolManagerMust(t, false, 0, nil, nil, nil, db, nil)
 	chain := pm.blockchain.(*core.BlockChain)
 	config := core.DefaultTxPoolConfig
 	config.Journal = ""
@@ -479,9 +496,9 @@ func TestTransactionStatusLes2(t *testing.T) {
 	}
 
 	// check if their status is included now
-	block1hash := core.GetCanonicalHash(db, 1)
-	test(tx1, false, txStatus{Status: core.TxStatusIncluded, Lookup: &core.TxLookupEntry{BlockHash: block1hash, BlockIndex: 1, Index: 0}})
-	test(tx2, false, txStatus{Status: core.TxStatusIncluded, Lookup: &core.TxLookupEntry{BlockHash: block1hash, BlockIndex: 1, Index: 1}})
+	block1hash := rawdb.ReadCanonicalHash(db, 1)
+	test(tx1, false, txStatus{Status: core.TxStatusIncluded, Lookup: &rawdb.LegacyTxLookupEntry{BlockHash: block1hash, BlockIndex: 1, Index: 0}})
+	test(tx2, false, txStatus{Status: core.TxStatusIncluded, Lookup: &rawdb.LegacyTxLookupEntry{BlockHash: block1hash, BlockIndex: 1, Index: 1}})
 
 	// create a reorg that rolls them back
 	gchain, _ = core.GenerateChain(params.TestChainConfig, chain.GetBlockByNumber(0), ethash.NewFaker(), db, 2, func(i int, block *core.BlockGen) {})
